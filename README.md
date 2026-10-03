@@ -24,3 +24,13 @@ No real chat names, chat IDs, or Telegram session credentials are stored in this
 The workflow is intended to run every 5 minutes, which is the shortest interval supported by GitHub Actions scheduled workflows.
 
 It can also be started manually from the Actions tab.
+
+
+## Long-term operation
+
+A separate weekly keepalive workflow creates a tiny timestamp commit. This keeps
+the public repository active so GitHub does not automatically disable scheduled
+workflows after 60 days of repository inactivity.
+
+The router itself remains independent of any personal computer. Rebooting or
+turning off a local computer does not affect scheduled runs.
