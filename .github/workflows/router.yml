@@ -1,9 +1,9 @@
 name: Telegram message router
 
 on:
-  # Enabled manually during initial secret setup and migration.
-  # The 5-minute schedule will be added after the first successful test.
   workflow_dispatch:
+  schedule:
+    - cron: "2-59/5 * * * *"
 
 permissions:
   contents: read
