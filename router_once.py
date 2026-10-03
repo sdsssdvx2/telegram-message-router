@@ -90,21 +90,28 @@ async def safe_forward(message, target_chat_id: int, label: str) -> None:
 
 
 async def find_state_message(app: Client):
-    # Prefer the neutral current checkpoint.
-    async for msg in app.search_messages("me", query=STATE_TAG, limit=50):
-        parsed = parse_state(msg.text or "")
-        if parsed and parsed[0] == SOURCE_CHAT_ID:
-            return msg, parsed[1], False
+    candidates = []
+    seen_ids = set()
 
-    # Migration path: adopt a compatible older checkpoint without knowing or
-    # publishing its old tag/name. Only a checkpoint for this exact source ID
-    # is accepted, then it is rewritten using the neutral tag above.
-    async for msg in app.search_messages("me", query="source_chat_id", limit=100):
-        parsed = parse_state(msg.text or "")
-        if parsed and parsed[0] == SOURCE_CHAT_ID:
-            return msg, parsed[1], True
+    # Collect neutral and older compatible checkpoints without knowing or
+    # publishing any previous tag/name. Only checkpoints for this exact source
+    # ID are accepted.
+    for query in (STATE_TAG, "source_chat_id"):
+        async for msg in app.search_messages("me", query=query, limit=100):
+            if msg.id in seen_ids:
+                continue
+            seen_ids.add(msg.id)
 
-    return None, None, False
+            parsed = parse_state(msg.text or "")
+            if parsed and parsed[0] == SOURCE_CHAT_ID:
+                candidates.append((parsed[1], msg))
+
+    if not candidates:
+        return None, None, False
+
+    last_processed_id, message = max(candidates, key=lambda item: item[0])
+    migrated = not (message.text or "").startswith(f"[{STATE_TAG}]")
+    return message, last_processed_id, migrated
 
 
 async def save_state(app: Client, state_message, last_processed_id: int):
