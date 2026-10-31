@@ -22,6 +22,7 @@ jobs:
     timeout-minutes: 4
     env:
       PRIVATE_AUTOMATION_TOKEN: ${{ secrets.PRIVATE_AUTOMATION_TOKEN }}
+      PUBLIC_GITHUB_TOKEN: ${{ github.token }}
     steps:
       - name: Dispatch private Android build only when resolved target changes
         shell: bash
@@ -30,13 +31,20 @@ jobs:
           import base64, json, os, re, sys, urllib.request
 
           token = os.environ.get('PRIVATE_AUTOMATION_TOKEN', '').strip()
+          public_token = os.environ.get('PUBLIC_GITHUB_TOKEN', '').strip()
           if not token:
               print('PRIVATE_AUTOMATION_TOKEN is not configured yet; public monitor is idle.')
               sys.exit(0)
 
-          public_headers = {'User-Agent': 'Eternal-Public-Target-Monitor/1'}
+          public_headers = {
+              'User-Agent': 'Eternal-Public-Target-Monitor/1',
+              'Accept': 'application/vnd.github+json',
+              'X-GitHub-Api-Version': '2022-11-28',
+          }
+          if public_token:
+              public_headers['Authorization'] = 'Bearer ' + public_token
           private_headers = {
-              **public_headers,
+              'User-Agent': 'Eternal-Public-Target-Monitor/1',
               'Authorization': 'Bearer ' + token,
               'Accept': 'application/vnd.github+json',
               'X-GitHub-Api-Version': '2022-11-28',
@@ -55,14 +63,19 @@ jobs:
           morphe = morphe_release['tag_name']
           eternal = eternal_release['tag_name']
 
+          # raw.githubusercontent.com does not use the REST API quota; keep these reads simple.
+          raw_headers = {'User-Agent': 'Eternal-Public-Target-Monitor/1'}
           youtube_text = fetch_bytes(
-              f'https://raw.githubusercontent.com/MorpheApp/morphe-patches/{morphe}/patches/src/main/kotlin/app/morphe/patches/youtube/shared/Constants.kt'
+              f'https://raw.githubusercontent.com/MorpheApp/morphe-patches/{morphe}/patches/src/main/kotlin/app/morphe/patches/youtube/shared/Constants.kt',
+              raw_headers,
           ).decode('utf-8')
           music_text = fetch_bytes(
-              f'https://raw.githubusercontent.com/MorpheApp/morphe-patches/{morphe}/patches/src/main/kotlin/app/morphe/patches/music/shared/Constants.kt'
+              f'https://raw.githubusercontent.com/MorpheApp/morphe-patches/{morphe}/patches/src/main/kotlin/app/morphe/patches/music/shared/Constants.kt',
+              raw_headers,
           ).decode('utf-8')
           eternal_text = fetch_bytes(
-              f'https://raw.githubusercontent.com/sdsssdvx2/eternal-youtube-history-patches/{eternal}/patches/src/main/kotlin/app/eternal/patches/youtube/history/EternalHistoryPatch.kt'
+              f'https://raw.githubusercontent.com/sdsssdvx2/eternal-youtube-history-patches/{eternal}/patches/src/main/kotlin/app/eternal/patches/youtube/history/EternalHistoryPatch.kt',
+              raw_headers,
           ).decode('utf-8')
 
           state_meta = fetch_json(
