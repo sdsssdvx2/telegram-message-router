@@ -1,4 +1,5 @@
 name: OneTab upstream change monitor
+# Secret wiring verified by a harmless workflow-file push; no token value is logged.
 
 on:
   schedule:
