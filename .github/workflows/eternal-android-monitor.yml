@@ -1,0 +1,143 @@
+name: Eternal Android target monitor
+
+on:
+  schedule:
+    - cron: '11 */2 * * *'
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/eternal-android-monitor.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: eternal-android-target-monitor
+  cancel-in-progress: true
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    env:
+      PRIVATE_AUTOMATION_TOKEN: ${{ secrets.PRIVATE_AUTOMATION_TOKEN }}
+    steps:
+      - name: Dispatch private Android build only when resolved target changes
+        shell: bash
+        run: |
+          python - <<'PY'
+          import base64, json, os, re, sys, urllib.request
+
+          token = os.environ.get('PRIVATE_AUTOMATION_TOKEN', '').strip()
+          if not token:
+              print('PRIVATE_AUTOMATION_TOKEN is not configured yet; public monitor is idle.')
+              sys.exit(0)
+
+          public_headers = {'User-Agent': 'Eternal-Public-Target-Monitor/1'}
+          private_headers = {
+              **public_headers,
+              'Authorization': 'Bearer ' + token,
+              'Accept': 'application/vnd.github+json',
+              'X-GitHub-Api-Version': '2022-11-28',
+          }
+
+          def fetch_bytes(url, headers=None):
+              request = urllib.request.Request(url, headers=headers or public_headers)
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  return response.read()
+
+          def fetch_json(url, headers=None):
+              return json.loads(fetch_bytes(url, headers).decode('utf-8'))
+
+          morphe_release = fetch_json('https://api.github.com/repos/MorpheApp/morphe-patches/releases/latest')
+          eternal_release = fetch_json('https://api.github.com/repos/sdsssdvx2/eternal-youtube-history-patches/releases/latest')
+          morphe = morphe_release['tag_name']
+          eternal = eternal_release['tag_name']
+
+          youtube_text = fetch_bytes(
+              f'https://raw.githubusercontent.com/MorpheApp/morphe-patches/{morphe}/patches/src/main/kotlin/app/morphe/patches/youtube/shared/Constants.kt'
+          ).decode('utf-8')
+          music_text = fetch_bytes(
+              f'https://raw.githubusercontent.com/MorpheApp/morphe-patches/{morphe}/patches/src/main/kotlin/app/morphe/patches/music/shared/Constants.kt'
+          ).decode('utf-8')
+          eternal_text = fetch_bytes(
+              f'https://raw.githubusercontent.com/sdsssdvx2/eternal-youtube-history-patches/{eternal}/patches/src/main/kotlin/app/eternal/patches/youtube/history/EternalHistoryPatch.kt'
+          ).decode('utf-8')
+
+          state_meta = fetch_json(
+              'https://api.github.com/repos/sdsssdvx2/eternal-android-builds/contents/build-state.json?ref=main',
+              private_headers,
+          )
+          state = json.loads(base64.b64decode(state_meta['content']).decode('utf-8'))
+
+          def stable_versions(text):
+              result = []
+              for match in re.finditer(r'AppTarget\((.*?)\)', text, re.S):
+                  block = match.group(1)
+                  version = re.search(r'version\s*=\s*"([^"]+)"', block)
+                  if not version or re.search(r'isExperimental\s*=\s*true', block):
+                      continue
+                  result.append(version.group(1))
+              if not result:
+                  raise RuntimeError('No stable target found')
+              return result
+
+          supported_by_eternal = set(
+              re.findall(r'AppTarget\(\s*version\s*=\s*"([^"]+)"', eternal_text, re.S)
+          )
+          if not supported_by_eternal:
+              raise RuntimeError('No Eternal YouTube compatibility targets found')
+
+          def version_key(value):
+              return tuple(int(part) for part in value.split('.'))
+
+          current_yt = state.get('youtube') or '0.0.0'
+          current_music = state.get('youtube_music') or '0.0.0'
+          youtube = next(
+              (
+                  version for version in stable_versions(youtube_text)
+                  if version in supported_by_eternal
+                  and version_key(version) >= version_key(current_yt)
+              ),
+              None,
+          )
+          music = next(
+              (
+                  version for version in stable_versions(music_text)
+                  if version_key(version) >= version_key(current_music)
+              ),
+              None,
+          )
+          if youtube is None:
+              raise RuntimeError(f'No non-downgrade Eternal-compatible YouTube target above {current_yt}')
+          if music is None:
+              raise RuntimeError(f'No non-downgrade Music target above {current_music}')
+
+          fingerprint = f'{morphe}|{eternal}|yt:{youtube}|music:{music}'
+          previous = state.get('fingerprint') or ''
+          print(f'resolved={fingerprint}')
+          print(f'deployed={previous}')
+          if fingerprint == previous:
+              print('Resolved Android targets are unchanged; no private runner is started.')
+              sys.exit(0)
+
+          dispatch_url = (
+              'https://api.github.com/repos/sdsssdvx2/eternal-android-builds/'
+              'actions/workflows/build-android.yml/dispatches'
+          )
+          body = json.dumps({'ref': 'main', 'inputs': {'force_build': 'false'}}).encode()
+          request = urllib.request.Request(
+              dispatch_url,
+              data=body,
+              method='POST',
+              headers={
+                  **private_headers,
+                  'Content-Type': 'application/json',
+              },
+          )
+          with urllib.request.urlopen(request, timeout=30) as response:
+              if response.status not in (204,):
+                  raise SystemExit(f'Unexpected workflow dispatch status: {response.status}')
+          print('New Eternal/Morphe/YouTube/Music target detected; private build workflow dispatched once.')
+          PY
