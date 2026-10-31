@@ -37,6 +37,14 @@ jobs:
               print('PRIVATE_AUTOMATION_TOKEN is not configured yet; public monitor is idle.')
               sys.exit(0)
 
+          # One-time migration guard: October private compute was exhausted. Do not
+          # burn blocked acceptance runs before the November cycle opens at 00:00 UTC.
+          not_before = datetime(2026, 11, 1, 0, 5, tzinfo=timezone.utc)
+          now = datetime.now(timezone.utc)
+          if now < not_before:
+              print(f'Private integration acceptance deferred until {not_before.isoformat()}; now={now.isoformat()}')
+              sys.exit(0)
+
           repo = 'sdsssdvx2/eternal-android-builds'
           integration_ref = 'hardening/integration-v2'
           api = 'https://api.github.com'
