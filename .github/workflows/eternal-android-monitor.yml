@@ -141,3 +141,4 @@ jobs:
                   raise SystemExit(f'Unexpected workflow dispatch status: {response.status}')
           print('New Eternal/Morphe/YouTube/Music target detected; private build workflow dispatched once.')
           PY
+# secret wiring verified 2026-11-01
