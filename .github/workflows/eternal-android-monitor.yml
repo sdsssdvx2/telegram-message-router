@@ -141,7 +141,8 @@ jobs:
               'https://api.github.com/repos/sdsssdvx2/eternal-android-builds/'
               'actions/workflows/build-android.yml/dispatches'
           )
-          body = json.dumps({'ref': 'main', 'inputs': {'force_build': 'false'}}).encode()
+          dispatch_ref = 'hardening/integration-v2'
+          body = json.dumps({'ref': dispatch_ref, 'inputs': {'force_build': 'false'}}).encode()
           request = urllib.request.Request(
               dispatch_url,
               data=body,
@@ -151,5 +152,5 @@ jobs:
           with urllib.request.urlopen(request, timeout=30) as response:
               if response.status != 204:
                   raise SystemExit(f'Unexpected workflow dispatch status: {response.status}')
-          print('New Eternal/Morphe/YouTube/Music target detected; private build workflow dispatched once.')
+          print(f'New Eternal/Morphe/YouTube/Music target detected; hardened private build dispatched on {dispatch_ref}.')
           PY
