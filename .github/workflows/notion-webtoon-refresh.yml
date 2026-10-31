@@ -32,7 +32,7 @@ jobs:
         shell: bash
         run: |
           python - <<'PY'
-          import json, os, time, urllib.request, urllib.error
+          import base64, json, os, time, urllib.request, urllib.error
 
           endpoint = 'https://notion-webtoon-sync-sdsssdvx2.onrender.com/api/scheduled-refresh'
           token_url = os.environ['ACTIONS_ID_TOKEN_REQUEST_URL'] + '&audience=webtoon-sync-sdsssdvx2'
@@ -49,6 +49,19 @@ jobs:
                   )
                   with urllib.request.urlopen(request, timeout=min(20, remaining)) as response:
                       token = json.load(response)['value']
+
+                  # Print only non-secret identity claims. Never print the token/signature.
+                  payload = token.split('.')[1]
+                  payload += '=' * (-len(payload) % 4)
+                  claims = json.loads(base64.urlsafe_b64decode(payload).decode('utf-8'))
+                  public_claims = {
+                      key: claims.get(key)
+                      for key in (
+                          'sub', 'repository', 'repository_id', 'repository_owner_id',
+                          'workflow_ref', 'ref', 'event_name', 'aud', 'iss'
+                      )
+                  }
+                  print('OIDC identity: ' + json.dumps(public_claims, sort_keys=True), flush=True)
 
                   request = urllib.request.Request(
                       endpoint,
