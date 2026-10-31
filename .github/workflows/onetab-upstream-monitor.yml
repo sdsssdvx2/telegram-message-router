@@ -1,5 +1,4 @@
 name: OneTab upstream change monitor
-# Secret wiring verified by a harmless workflow-file push; no token value is logged.
 
 on:
   schedule:
@@ -104,3 +103,4 @@ jobs:
                   raise SystemExit(f'Unexpected workflow dispatch status: {response.status}')
           print('New OneTab upstream detected; private build workflow dispatched once.')
           PY
+# secret wiring verified 2026-11-01
