@@ -1,0 +1,97 @@
+name: Notion webtoon refresh dispatcher
+
+on:
+  schedule:
+    # Same durable-resume cadence as the former private workflow.
+    # KST 03:17–05:07: one daily cycle with short wake-ups.
+    - cron: '17,27,37,47,57 18 * * *'
+    - cron: '7,17,27,37,47,57 19 * * *'
+    - cron: '7 20 * * *'
+    # KST 09:17 and 15:17: catch a delayed or interrupted run.
+    - cron: '17 0,6 * * *'
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/notion-webtoon-refresh.yml'
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: notion-webtoon-refresh-dispatcher
+  cancel-in-progress: false
+
+jobs:
+  wake:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Wake Render and resume its durable daily cursor
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json, os, time, urllib.request, urllib.error
+
+          endpoint = 'https://notion-webtoon-sync-sdsssdvx2.onrender.com/api/scheduled-refresh'
+          token_url = os.environ['ACTIONS_ID_TOKEN_REQUEST_URL'] + '&audience=webtoon-sync-sdsssdvx2'
+          deadline = time.monotonic() + 240
+
+          for attempt in range(3):
+              remaining = deadline - time.monotonic()
+              if remaining <= 1:
+                  raise SystemExit('Wake-up time budget exceeded; saved work resumes on the next request.')
+              try:
+                  request = urllib.request.Request(
+                      token_url,
+                      headers={'Authorization': 'Bearer ' + os.environ['ACTIONS_ID_TOKEN_REQUEST_TOKEN']},
+                  )
+                  with urllib.request.urlopen(request, timeout=min(20, remaining)) as response:
+                      token = json.load(response)['value']
+
+                  request = urllib.request.Request(
+                      endpoint,
+                      data=b'{}',
+                      headers={
+                          'Authorization': 'Bearer ' + token,
+                          'Content-Type': 'application/json',
+                      },
+                      method='POST',
+                  )
+                  remaining = deadline - time.monotonic()
+                  if remaining <= 1:
+                      raise SystemExit('Wake-up time budget exceeded; saved work resumes on the next request.')
+                  with urllib.request.urlopen(request, timeout=min(140, remaining)) as response:
+                      result = json.load(response)
+
+                  if result.get('status') not in ('running', 'done'):
+                      raise ValueError('Unexpected scheduler response')
+                  print(
+                      'phase=%s completed=%s total=%s errors=%s'
+                      % (
+                          result.get('phase'),
+                          result.get('completed', 0),
+                          result.get('total', 0),
+                          result.get('errors', 0),
+                      ),
+                      flush=True,
+                  )
+                  print(
+                      'Already complete today.' if result.get('done')
+                      else 'Accepted. Render continues from its durable cursor.',
+                      flush=True,
+                  )
+                  break
+              except (urllib.error.URLError, TimeoutError, ValueError, KeyError) as error:
+                  print('Refresh connection paused: ' + type(error).__name__, flush=True)
+                  if isinstance(error, urllib.error.HTTPError) and error.code in (401, 403, 404, 422):
+                      raise SystemExit(
+                          'Scheduler authorization/configuration failed (HTTP %s)' % error.code
+                      )
+                  if attempt == 2:
+                      raise SystemExit(
+                          'Repeated connection failures; durable cursor will resume next wake-up.'
+                      )
+                  time.sleep(min(10, max(0, deadline - time.monotonic())))
+          PY
