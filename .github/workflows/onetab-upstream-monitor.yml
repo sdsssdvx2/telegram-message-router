@@ -1,0 +1,105 @@
+name: OneTab upstream change monitor
+
+on:
+  schedule:
+    - cron: '37 * * * *'
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/onetab-upstream-monitor.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: onetab-upstream-change-monitor
+  cancel-in-progress: true
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    env:
+      PRIVATE_AUTOMATION_TOKEN: ${{ secrets.PRIVATE_AUTOMATION_TOKEN }}
+    steps:
+      - name: Dispatch private build only when official OneTab is newer
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json, os, sys, urllib.parse, urllib.request, xml.etree.ElementTree as ET
+          from datetime import datetime, timezone
+
+          token = os.environ.get('PRIVATE_AUTOMATION_TOKEN', '').strip()
+          if not token:
+              print('PRIVATE_AUTOMATION_TOKEN is not configured yet; public monitor is idle.')
+              sys.exit(0)
+
+          official_id = 'chphlpgkkbolifaimnlloiipkdnihall'
+          update_base = 'https://otps-mupd-a61e9f37.joj2035.workers.dev'
+          x = urllib.parse.quote(f'id={official_id}&uc', safe='')
+          update_url = (
+              'https://clients2.google.com/service/update2/crx'
+              f'?response=updatecheck&prodversion=999.0.0.0&acceptformat=crx3&x={x}'
+          )
+
+          def fetch_json(url, headers=None):
+              request = urllib.request.Request(
+                  url,
+                  headers={'User-Agent': 'OneTab-Public-Change-Monitor/1', **(headers or {})},
+              )
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  return json.load(response)
+
+          request = urllib.request.Request(
+              update_url,
+              headers={'User-Agent': 'OneTab-Public-Change-Monitor/1', 'Accept': 'application/xml'},
+          )
+          with urllib.request.urlopen(request, timeout=30) as response:
+              root = ET.fromstring(response.read())
+          node = next((item for item in root.iter() if item.tag.endswith('updatecheck')), None)
+          if node is None or node.attrib.get('status', 'ok') != 'ok':
+              raise SystemExit('Official OneTab update response has no successful updatecheck.')
+          official = node.attrib.get('version')
+          if not official:
+              raise SystemExit('Official OneTab update response has no version.')
+
+          cache_bust = urllib.parse.quote(datetime.now(timezone.utc).isoformat(), safe='')
+          try:
+              deployed = fetch_json(f'{update_base}/desktop-release.json?cb={cache_bust}')
+              deployed_version = str(deployed.get('upstreamVersion', '0'))
+          except Exception as error:
+              print(f'Deployed manifest could not be read ({type(error).__name__}); requesting fail-closed private detection.')
+              deployed_version = '0'
+
+          def version_key(value):
+              parts = [int(part) for part in str(value).split('.')]
+              return tuple(parts + [0] * (8 - len(parts)))
+
+          print(f'official={official} deployed={deployed_version}')
+          if version_key(official) <= version_key(deployed_version):
+              print('No newer official OneTab release; no private runner is started.')
+              sys.exit(0)
+
+          dispatch_url = (
+              'https://api.github.com/repos/sdsssdvx2/onetab-private-sync-builds/'
+              'actions/workflows/onetab-upstream-build.yml/dispatches'
+          )
+          body = json.dumps({'ref': 'main', 'inputs': {'force_build': 'false'}}).encode()
+          request = urllib.request.Request(
+              dispatch_url,
+              data=body,
+              method='POST',
+              headers={
+                  'Authorization': 'Bearer ' + token,
+                  'Accept': 'application/vnd.github+json',
+                  'X-GitHub-Api-Version': '2022-11-28',
+                  'Content-Type': 'application/json',
+                  'User-Agent': 'OneTab-Public-Change-Monitor/1',
+              },
+          )
+          with urllib.request.urlopen(request, timeout=30) as response:
+              if response.status not in (204,):
+                  raise SystemExit(f'Unexpected workflow dispatch status: {response.status}')
+          print('New OneTab upstream detected; private build workflow dispatched once.')
+          PY
