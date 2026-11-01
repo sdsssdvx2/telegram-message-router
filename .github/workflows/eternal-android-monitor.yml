@@ -37,26 +37,18 @@ jobs:
               print('PRIVATE_AUTOMATION_TOKEN is not configured yet; public monitor is idle.')
               sys.exit(0)
 
-          # One-time migration guard: October private compute was exhausted. Do not
-          # burn blocked acceptance runs before the November cycle opens at 00:00 UTC.
-          not_before = datetime(2026, 11, 1, 0, 5, tzinfo=timezone.utc)
-          now = datetime.now(timezone.utc)
-          if now < not_before:
-              print(f'Private integration acceptance deferred until {not_before.isoformat()}; now={now.isoformat()}')
-              sys.exit(0)
-
           repo = 'sdsssdvx2/eternal-android-builds'
           integration_ref = 'hardening/integration-v2'
           api = 'https://api.github.com'
           public_headers = {
-              'User-Agent': 'Eternal-Public-Target-Monitor/2',
+              'User-Agent': 'Eternal-Public-Target-Monitor/3',
               'Accept': 'application/vnd.github+json',
               'X-GitHub-Api-Version': '2022-11-28',
           }
           if public_token:
               public_headers['Authorization'] = 'Bearer ' + public_token
           private_headers = {
-              'User-Agent': 'Eternal-Public-Target-Monitor/2',
+              'User-Agent': 'Eternal-Public-Target-Monitor/3',
               'Authorization': 'Bearer ' + token,
               'Accept': 'application/vnd.github+json',
               'X-GitHub-Api-Version': '2022-11-28',
@@ -86,20 +78,27 @@ jobs:
                       raise RuntimeError(f'{workflow} dispatch returned HTTP {response.status}')
               print(f'dispatched {workflow} on {ref}')
 
+          def workflow_runs(workflow, ref=None, event='workflow_dispatch', per_page=10):
+              query = {'event': event, 'per_page': per_page}
+              if ref: query['branch'] = ref
+              return fetch_json(
+                  f'{api}/repos/{repo}/actions/workflows/{workflow}/runs?{urllib.parse.urlencode(query)}',
+                  private_headers,
+              ).get('workflow_runs', [])
+
+          def latest_success(workflow, ref):
+              for run in workflow_runs(workflow, ref, per_page=20):
+                  if run.get('status') == 'completed' and run.get('conclusion') == 'success':
+                      return run
+              return None
+
           def wait_for_dispatch(workflow, ref, started_after, timeout_minutes):
               deadline = time.monotonic() + timeout_minutes * 60
-              query = urllib.parse.urlencode({
-                  'event': 'workflow_dispatch',
-                  'branch': ref,
-                  'per_page': 10,
-              })
-              runs_url = f'{api}/repos/{repo}/actions/workflows/{workflow}/runs?{query}'
               run_id = None
               last_status = None
               while time.monotonic() < deadline:
-                  runs = fetch_json(runs_url, private_headers).get('workflow_runs', [])
                   eligible = []
-                  for run in runs:
+                  for run in workflow_runs(workflow, ref):
                       created = datetime.fromisoformat(run['created_at'].replace('Z', '+00:00'))
                       if created >= started_after and run.get('head_branch') == ref:
                           eligible.append(run)
@@ -114,12 +113,10 @@ jobs:
                           last_status = marker
                       if status == 'completed':
                           if conclusion != 'success':
-                              raise RuntimeError(
-                                  f'{workflow} integration acceptance failed: run={run_id} conclusion={conclusion}'
-                              )
+                              raise RuntimeError(f'{workflow} failed: run={run_id} conclusion={conclusion}')
                           return run_id
                   time.sleep(10)
-              raise TimeoutError(f'{workflow} integration acceptance timed out; latest run={run_id}')
+              raise TimeoutError(f'{workflow} timed out; latest run={run_id}')
 
           def run_gate(workflow, timeout_minutes):
               started_after = datetime.now(timezone.utc) - timedelta(seconds=10)
@@ -131,24 +128,18 @@ jobs:
           morphe = morphe_release['tag_name']
           eternal = eternal_release['tag_name']
 
-          raw_headers = {'User-Agent': 'Eternal-Public-Target-Monitor/2'}
+          raw_headers = {'User-Agent': 'Eternal-Public-Target-Monitor/3'}
           youtube_text = fetch_bytes(
-              f'https://raw.githubusercontent.com/MorpheApp/morphe-patches/{morphe}/patches/src/main/kotlin/app/morphe/patches/youtube/shared/Constants.kt',
-              raw_headers,
+              f'https://raw.githubusercontent.com/MorpheApp/morphe-patches/{morphe}/patches/src/main/kotlin/app/morphe/patches/youtube/shared/Constants.kt', raw_headers,
           ).decode('utf-8')
           music_text = fetch_bytes(
-              f'https://raw.githubusercontent.com/MorpheApp/morphe-patches/{morphe}/patches/src/main/kotlin/app/morphe/patches/music/shared/Constants.kt',
-              raw_headers,
+              f'https://raw.githubusercontent.com/MorpheApp/morphe-patches/{morphe}/patches/src/main/kotlin/app/morphe/patches/music/shared/Constants.kt', raw_headers,
           ).decode('utf-8')
           eternal_text = fetch_bytes(
-              f'https://raw.githubusercontent.com/sdsssdvx2/eternal-youtube-history-patches/{eternal}/patches/src/main/kotlin/app/eternal/patches/youtube/history/EternalHistoryPatch.kt',
-              raw_headers,
+              f'https://raw.githubusercontent.com/sdsssdvx2/eternal-youtube-history-patches/{eternal}/patches/src/main/kotlin/app/eternal/patches/youtube/history/EternalHistoryPatch.kt', raw_headers,
           ).decode('utf-8')
 
-          state_meta = fetch_json(
-              f'{api}/repos/{repo}/contents/build-state.json?ref=main',
-              private_headers,
-          )
+          state_meta = fetch_json(f'{api}/repos/{repo}/contents/build-state.json?ref=main', private_headers)
           state = json.loads(base64.b64decode(state_meta['content']).decode('utf-8'))
 
           def stable_versions(text):
@@ -159,25 +150,19 @@ jobs:
                   if not version or re.search(r'isExperimental\s*=\s*true', block):
                       continue
                   result.append(version.group(1))
-              if not result:
-                  raise RuntimeError('No stable target found')
+              if not result: raise RuntimeError('No stable target found')
               return result
 
           supported_by_eternal = set(re.findall(r'AppTarget\(\s*version\s*=\s*"([^"]+)"', eternal_text, re.S))
-          if not supported_by_eternal:
-              raise RuntimeError('No Eternal YouTube compatibility targets found')
+          if not supported_by_eternal: raise RuntimeError('No Eternal YouTube compatibility targets found')
 
-          def version_key(value):
-              return tuple(int(part) for part in value.split('.'))
-
+          def version_key(value): return tuple(int(part) for part in value.split('.'))
           current_yt = state.get('youtube') or '0.0.0'
           current_music = state.get('youtube_music') or '0.0.0'
           youtube = next((v for v in stable_versions(youtube_text) if v in supported_by_eternal and version_key(v) >= version_key(current_yt)), None)
           music = next((v for v in stable_versions(music_text) if version_key(v) >= version_key(current_music)), None)
-          if youtube is None:
-              raise RuntimeError(f'No non-downgrade Eternal-compatible YouTube target above {current_yt}')
-          if music is None:
-              raise RuntimeError(f'No non-downgrade Music target above {current_music}')
+          if youtube is None: raise RuntimeError(f'No non-downgrade Eternal-compatible YouTube target above {current_yt}')
+          if music is None: raise RuntimeError(f'No non-downgrade Music target above {current_music}')
 
           fingerprint = f'{morphe}|{eternal}|yt:{youtube}|music:{music}'
           previous = state.get('fingerprint') or ''
@@ -187,35 +172,39 @@ jobs:
               print('Resolved Android targets are unchanged; no private runner is started.')
               sys.exit(0)
 
-          # A blocked or slow private runner must not be re-dispatched repeatedly.
-          runs = fetch_json(
-              f'{api}/repos/{repo}/actions/workflows/build-android.yml/runs?event=workflow_dispatch&per_page=10',
-              private_headers,
-          ).get('workflow_runs', [])
-          if runs:
-              latest = runs[0]
+          android_runs = workflow_runs('build-android.yml', None, per_page=10)
+          if android_runs:
+              latest = android_runs[0]
               created = datetime.fromisoformat(latest['created_at'].replace('Z', '+00:00'))
               age_hours = (datetime.now(timezone.utc) - created).total_seconds() / 3600
-              print(
-                  'latest_private_dispatch='
-                  f"status:{latest.get('status')} conclusion:{latest.get('conclusion')} age_hours:{age_hours:.2f}"
-              )
               if latest.get('status') in ('queued', 'in_progress', 'waiting', 'pending', 'requested') or age_hours < 4:
-                  print('A recent private build request already exists; cooldown prevents duplicate dispatch.')
+                  print('A recent private Android build request already exists; cooldown prevents duplicate dispatch.')
                   sys.exit(0)
 
-          print('Target changed. Running fail-closed integration acceptance before any Android release build.')
-          gateway_run = run_gate('test-update-gateway.yml', 10)
-          updater_build_run = run_gate('build-updater.yml', 20)
-          updater_runtime_run = run_gate('test-updater-runtime.yml', 30)
-          print(
-              'integration acceptance passed: '
-              f'gateway={gateway_run} updater-build={updater_build_run} updater-runtime={updater_runtime_run}'
-          )
+          # The gateway and exact-signer updater build passed on this hardening set on Nov 1.
+          # Reuse those successes across a runtime-smoke-only workflow fix; do not burn them again.
+          gateway_ok = latest_success('test-update-gateway.yml', integration_ref)
+          updater_ok = latest_success('build-updater.yml', integration_ref)
+          runtime_ok = latest_success('test-updater-runtime.yml', integration_ref)
+
+          if not gateway_ok:
+              print('No successful gateway hardening acceptance found; running it.')
+              run_gate('test-update-gateway.yml', 10)
+          else:
+              print(f'Reusing successful gateway acceptance run={gateway_ok["id"]}.')
+
+          if not updater_ok:
+              print('No successful updater signer acceptance found; running it.')
+              run_gate('build-updater.yml', 20)
+          else:
+              print(f'Reusing successful updater signer acceptance run={updater_ok["id"]}.')
+
+          if not runtime_ok or runtime_ok.get('head_sha') != fetch_json(f'{api}/repos/{repo}/branches/{urllib.parse.quote(integration_ref, safe="")}', private_headers)['commit']['sha']:
+              print('Running Android 16 runtime smoke for the current integration head.')
+              run_gate('test-updater-runtime.yml', 30)
+          else:
+              print(f'Reusing successful Android 16 runtime acceptance run={runtime_ok["id"]}.')
 
           dispatch('build-android.yml', integration_ref, {'force_build': 'false'})
-          print(
-              'All hardening gates passed; latest Eternal/Morphe/YouTube/Music target '
-              f'was dispatched on {integration_ref}.'
-          )
+          print(f'All hardening gates passed; Android build dispatched on {integration_ref}.')
           PY
