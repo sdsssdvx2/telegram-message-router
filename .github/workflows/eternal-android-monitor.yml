@@ -14,17 +14,17 @@ permissions:
 
 concurrency:
   group: eternal-android-target-monitor
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   detect:
     runs-on: ubuntu-latest
-    timeout-minutes: 65
+    timeout-minutes: 5
     env:
       PRIVATE_AUTOMATION_TOKEN: ${{ secrets.PRIVATE_AUTOMATION_TOKEN }}
       PUBLIC_GITHUB_TOKEN: ${{ github.token }}
     steps:
-      - name: Validate hardened integration and dispatch private Android build only on change
+      - name: Dispatch current main only when stable targets change
         shell: bash
         run: |
           python - <<'PY'
@@ -34,11 +34,10 @@ jobs:
           token = os.environ.get('PRIVATE_AUTOMATION_TOKEN', '').strip()
           public_token = os.environ.get('PUBLIC_GITHUB_TOKEN', '').strip()
           if not token:
-              print('PRIVATE_AUTOMATION_TOKEN is not configured yet; public monitor is idle.')
-              sys.exit(0)
+              raise RuntimeError('PRIVATE_AUTOMATION_TOKEN is not configured')
 
           repo = 'sdsssdvx2/eternal-android-builds'
-          integration_ref = 'hardening/integration-v2'
+          production_ref = 'main'
           api = 'https://api.github.com'
           public_headers = {
               'User-Agent': 'Eternal-Public-Target-Monitor/3',
@@ -78,50 +77,13 @@ jobs:
                       raise RuntimeError(f'{workflow} dispatch returned HTTP {response.status}')
               print(f'dispatched {workflow} on {ref}')
 
-          def workflow_runs(workflow, ref=None, event='workflow_dispatch', per_page=10):
-              query = {'event': event, 'per_page': per_page}
+          def workflow_runs(workflow, ref=None, per_page=30):
+              query = {'per_page': per_page}
               if ref: query['branch'] = ref
               return fetch_json(
                   f'{api}/repos/{repo}/actions/workflows/{workflow}/runs?{urllib.parse.urlencode(query)}',
                   private_headers,
               ).get('workflow_runs', [])
-
-          def latest_success(workflow, ref):
-              for run in workflow_runs(workflow, ref, per_page=20):
-                  if run.get('status') == 'completed' and run.get('conclusion') == 'success':
-                      return run
-              return None
-
-          def wait_for_dispatch(workflow, ref, started_after, timeout_minutes):
-              deadline = time.monotonic() + timeout_minutes * 60
-              run_id = None
-              last_status = None
-              while time.monotonic() < deadline:
-                  eligible = []
-                  for run in workflow_runs(workflow, ref):
-                      created = datetime.fromisoformat(run['created_at'].replace('Z', '+00:00'))
-                      if created >= started_after and run.get('head_branch') == ref:
-                          eligible.append(run)
-                  if eligible:
-                      run = sorted(eligible, key=lambda item: item['created_at'], reverse=True)[0]
-                      run_id = run['id']
-                      status = run.get('status')
-                      conclusion = run.get('conclusion')
-                      marker = (status, conclusion)
-                      if marker != last_status:
-                          print(f'{workflow} run={run_id} status={status} conclusion={conclusion}')
-                          last_status = marker
-                      if status == 'completed':
-                          if conclusion != 'success':
-                              raise RuntimeError(f'{workflow} failed: run={run_id} conclusion={conclusion}')
-                          return run_id
-                  time.sleep(10)
-              raise TimeoutError(f'{workflow} timed out; latest run={run_id}')
-
-          def run_gate(workflow, timeout_minutes):
-              started_after = datetime.now(timezone.utc) - timedelta(seconds=10)
-              dispatch(workflow, integration_ref)
-              return wait_for_dispatch(workflow, integration_ref, started_after, timeout_minutes)
 
           morphe_release = fetch_json('https://api.github.com/repos/MorpheApp/morphe-patches/releases/latest')
           eternal_release = fetch_json('https://api.github.com/repos/sdsssdvx2/eternal-youtube-history-patches/releases/latest')
@@ -172,7 +134,11 @@ jobs:
               print('Resolved Android targets are unchanged; no private runner is started.')
               sys.exit(0)
 
-          android_runs = workflow_runs('build-android.yml', None, per_page=10)
+          android_runs = workflow_runs('build-android.yml', production_ref)
+          active = [run for run in android_runs if run.get('status') != 'completed']
+          if active:
+              print('A production Android run is active; no duplicate dispatch.')
+              sys.exit(0)
           if android_runs:
               latest = android_runs[0]
               created = datetime.fromisoformat(latest['created_at'].replace('Z', '+00:00'))
@@ -181,30 +147,9 @@ jobs:
                   print('A recent private Android build request already exists; cooldown prevents duplicate dispatch.')
                   sys.exit(0)
 
-          # The gateway and exact-signer updater build passed on this hardening set on Nov 1.
-          # Reuse those successes across a runtime-smoke-only workflow fix; do not burn them again.
-          gateway_ok = latest_success('test-update-gateway.yml', integration_ref)
-          updater_ok = latest_success('build-updater.yml', integration_ref)
-          runtime_ok = latest_success('test-updater-runtime.yml', integration_ref)
-
-          if not gateway_ok:
-              print('No successful gateway hardening acceptance found; running it.')
-              run_gate('test-update-gateway.yml', 10)
-          else:
-              print(f'Reusing successful gateway acceptance run={gateway_ok["id"]}.')
-
-          if not updater_ok:
-              print('No successful updater signer acceptance found; running it.')
-              run_gate('build-updater.yml', 20)
-          else:
-              print(f'Reusing successful updater signer acceptance run={updater_ok["id"]}.')
-
-          if not runtime_ok or runtime_ok.get('head_sha') != fetch_json(f'{api}/repos/{repo}/branches/{urllib.parse.quote(integration_ref, safe="")}', private_headers)['commit']['sha']:
-              print('Running Android 16 runtime smoke for the current integration head.')
-              run_gate('test-updater-runtime.yml', 30)
-          else:
-              print(f'Reusing successful Android 16 runtime acceptance run={runtime_ok["id"]}.')
-
-          dispatch('build-android.yml', integration_ref, {'force_build': 'false'})
-          print(f'All hardening gates passed; Android build dispatched on {integration_ref}.')
+          # Production CI is validated before merge. Polling must not dispatch obsolete
+          # integration branches or repeatedly rerun expensive acceptance workflows.
+          dispatch('build-android.yml', production_ref, {'force_build': 'false'})
+          print(f'Changed stable targets dispatched on {production_ref}.')
           PY
+

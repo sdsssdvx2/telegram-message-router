@@ -1,0 +1,17 @@
+name: Test Eternal Android target monitor
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/eternal-android-monitor.yml'
+      - '.github/workflows/eternal-android-monitor-test.yml'
+      - '.github/scripts/test-eternal-android-monitor.py'
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v7
+      - run: python .github/scripts/test-eternal-android-monitor.py
