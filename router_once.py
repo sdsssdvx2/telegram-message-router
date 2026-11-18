@@ -208,4 +208,8 @@ if __name__ == "__main__":
         # Do not print exception arguments: Telegram errors can contain
         # identifiers that should not appear in public Actions logs.
         print(f"[ERROR] Router run failed ({type(exc).__name__}).")
+        # Location only (file name, line, function). No exception arguments.
+        import traceback
+        for frame in traceback.extract_tb(exc.__traceback__):
+            print(f"[TRACE] {os.path.basename(frame.filename)}:{frame.lineno} {frame.name}")
         raise SystemExit(1)
