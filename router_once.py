@@ -27,6 +27,9 @@ MAX_FLOODWAIT_SECONDS = 240
 # How many recent messages of the document destination are checked so that a
 # document already present there (for example forwarded by hand) is not sent twice.
 DUPLICATE_LOOKBACK = 400
+# 0 = check once and exit (scheduled runs). >0 = stay connected and check
+# every N seconds (always-on server).
+LOOP_SECONDS = int(os.environ.get("ROUTER_LOOP_SECONDS", "0") or 0)
 
 
 def is_document(message) -> bool:
@@ -74,7 +77,7 @@ async def safe_forward(message, target_chat_id: int, label: str) -> None:
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             await message.forward(target_chat_id)
-            print(f"[FORWARDED] {label}")
+            print(f"[FORWARDED] {label}", flush=True)
             return
 
         except FloodWait as exc:
@@ -171,11 +174,35 @@ async def run_once() -> None:
     )
 
     async with app:
+        if LOOP_SECONDS <= 0:
+            await cycle(app)
+            return
+
+        # Server mode: keep one connection open and check repeatedly.
+        print(f"[LOOP] Checking every {LOOP_SECONDS}s.", flush=True)
+        while True:
+            await cycle(app, quiet=True)
+            await asyncio.sleep(LOOP_SECONDS)
+
+
+_checkpoint_cache = {}
+
+
+async def cycle(app: Client, quiet: bool = False) -> None:
+    # In server mode the checkpoint is looked up once and then kept in memory.
+    if quiet and _checkpoint_cache:
+        state_message = _checkpoint_cache["message"]
+        last_processed_id = _checkpoint_cache["id"]
+        migrated = False
+    else:
         state_message, last_processed_id, migrated = await find_state_message(app)
+
+    try:
 
         if state_message is None:
             current_id = await latest_source_id(app)
-            await save_state(app, None, current_id)
+            state_message = await save_state(app, None, current_id)
+            last_processed_id = current_id
             print("[BOOTSTRAP] Checkpoint created at the current source position.")
             return
 
@@ -186,10 +213,11 @@ async def run_once() -> None:
         pending = await collect_pending(app, last_processed_id)
 
         if not pending:
-            print("[IDLE] No new messages.")
+            if not quiet:
+                print("[IDLE] No new messages.")
             return
 
-        print(f"[START] Checking {len(pending)} new message(s).")
+        print(f"[START] Checking {len(pending)} new message(s).", flush=True)
         since_checkpoint = 0
         already_there = None
         skipped = 0
@@ -225,8 +253,12 @@ async def run_once() -> None:
 
         await save_state(app, state_message, last_processed_id)
         if skipped:
-            print(f"[SKIP] {skipped} document(s) already in the destination.")
-        print("[DONE] Checkpoint updated.")
+            print(f"[SKIP] {skipped} document(s) already in the destination.", flush=True)
+        print("[DONE] Checkpoint updated.", flush=True)
+    finally:
+        if state_message is not None and last_processed_id is not None:
+            _checkpoint_cache["message"] = state_message
+            _checkpoint_cache["id"] = last_processed_id
 
 
 if __name__ == "__main__":

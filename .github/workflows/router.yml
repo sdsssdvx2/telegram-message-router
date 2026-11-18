@@ -1,9 +1,10 @@
 name: Telegram message router
 
+# The router now runs on an always-on server (ROUTER_LOOP_SECONDS).
+# This workflow is kept for manual runs only, so the same Telegram session is
+# never used from two places at once.
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "2-59/5 * * * *"
 
 permissions:
   contents: read

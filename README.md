@@ -21,10 +21,11 @@ No real chat names, chat IDs, or Telegram session credentials are stored in this
 
 ## Schedule
 
-The workflow is intended to run every 5 minutes, which is the shortest interval supported by GitHub Actions scheduled workflows.
+The router runs on an always-on server: with `ROUTER_LOOP_SECONDS=60` the script
+stays connected and checks once a minute. Without that variable it checks once
+and exits, which is what the manual GitHub Actions workflow does.
 
-It can also be started manually from the Actions tab.
-
+Do not run both at the same time with the same Telegram session.
 
 ## Long-term operation
 
