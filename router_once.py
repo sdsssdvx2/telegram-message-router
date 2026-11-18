@@ -4,7 +4,7 @@ import re
 import sys
 from typing import Optional
 
-from pyrogram import Client
+from pyrogram import Client, utils as pyrogram_utils
 from pyrogram.enums import MessageEntityType
 from pyrogram.errors import FloodWait, RPCError
 
@@ -14,11 +14,19 @@ SOURCE_CHAT_ID = int(os.environ["SOURCE_CHAT_ID"])
 DOCUMENT_TARGET_CHAT_ID = int(os.environ["DOCUMENT_TARGET_CHAT_ID"])
 LINK_TARGET_CHAT_ID = int(os.environ["LINK_TARGET_CHAT_ID"])
 
+# Pyrogram 2.0.106 only knows the old channel ID range and rejects channels
+# created more recently ("Peer id invalid"). Widen the accepted range.
+pyrogram_utils.MIN_CHANNEL_ID = -1007852516352
+pyrogram_utils.MIN_CHAT_ID = -999999999999
+
 STATE_TAG = "telegram-message-router-state-v1"
 URL_RE = re.compile(r"(?i)(?:https?://|www\.|t\.me/)\S+")
 
 MAX_RETRIES = 5
 MAX_FLOODWAIT_SECONDS = 240
+# How many recent messages of the document destination are checked so that a
+# document already present there (for example forwarded by hand) is not sent twice.
+DUPLICATE_LOOKBACK = 400
 
 
 def is_document(message) -> bool:
@@ -144,6 +152,16 @@ async def collect_pending(app: Client, last_processed_id: int):
     return pending
 
 
+async def existing_document_ids(app: Client) -> set:
+    found = set()
+
+    async for msg in app.get_chat_history(DOCUMENT_TARGET_CHAT_ID, limit=DUPLICATE_LOOKBACK):
+        if msg.document is not None:
+            found.add(msg.document.file_unique_id)
+
+    return found
+
+
 async def run_once() -> None:
     app = Client(
         "telegram_message_router_actions",
@@ -173,12 +191,22 @@ async def run_once() -> None:
 
         print(f"[START] Checking {len(pending)} new message(s).")
         since_checkpoint = 0
+        already_there = None
+        skipped = 0
 
         for msg in pending:
             forwarded = False
 
             if is_document(msg):
-                await safe_forward(msg, DOCUMENT_TARGET_CHAT_ID, "document")
+                if already_there is None:
+                    already_there = await existing_document_ids(app)
+
+                unique_id = msg.document.file_unique_id
+                if unique_id in already_there:
+                    skipped += 1
+                else:
+                    await safe_forward(msg, DOCUMENT_TARGET_CHAT_ID, "document")
+                    already_there.add(unique_id)
                 forwarded = True
             elif is_link_text(msg):
                 await safe_forward(msg, LINK_TARGET_CHAT_ID, "link")
@@ -196,6 +224,8 @@ async def run_once() -> None:
                 since_checkpoint = 0
 
         await save_state(app, state_message, last_processed_id)
+        if skipped:
+            print(f"[SKIP] {skipped} document(s) already in the destination.")
         print("[DONE] Checkpoint updated.")
 
 
